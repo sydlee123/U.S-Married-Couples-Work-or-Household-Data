@@ -1,0 +1,484 @@
+---
+title: Economics
+format: html
+editor: visual
+---
+
+# Problem
+
+How being a housewife impact household income? (i.e.Causal effect of housewives on family income)
+
+# Data
+
+<https://www.kaggle.com/datasets/utkarshx27/labor-supply-data>
+
+## Data Description
+
+|            |                                                                |
+|-----------------|-------------------------------------------------------|
+| work       | Work at home in 1975? (Same as labor force participation)      |
+| hoursw     | Wife's hours of work in 1975                                   |
+| child6     | Number of children less than 6 years old in household          |
+| child618   | Number of children between ages 6 and 18 in household          |
+| agew       | Wife's age                                                     |
+| educw      | Wife's educational attainment, in years                        |
+| hearnw     | Wife's average hourly earnings, in 1975 dollars                |
+| wagew      | Wife's wage reported at the time of the 1976 interview         |
+| hoursh     | Husband's hours worked in 1975                                 |
+| ageh       | Husband's age                                                  |
+| educh      | Husband's educational attainment, in years                     |
+| wageh      | Husband's wage, in 1975 dollars                                |
+| income     | Family income, in 1975 dollars                                 |
+| educwm     | Wife's mother's educational attainment, in years               |
+| educwf     | Wife's father's educational attainment, in years               |
+| unemprate  | Unemployment rate in county of residence, in percentage points |
+| city       | Lives in a large city (SMSA)?                                  |
+| experience | Actual years of wife's previous labor market experience        |
+
+-   Outcome: Family Income (income)
+
+-   Treatment: The households with a housewife in 1975 (work = yes)
+
+-   Treatment effect: Impact of the wife being a housewife on the family income
+
+-   Treated Group: Households with a housewife
+
+-   Controlled Group: Households with a wife not working at home (work = no)
+
+## Housekeeping
+
+```{r}
+knitr::opts_chunk$set(echo = TRUE)
+rm(list=ls()) # clear workspace
+cat("\014")  # clear console
+library("AER")
+library("MatchIt")
+library("marginaleffects")
+library("dplyr")
+library("ggplot2")
+library("tidyverse")
+```
+
+### Load and clean data
+
+```{r}
+Mroz = read.csv("Mroz.csv")
+data = Mroz %>%
+      mutate(work = ifelse(work == "no", 0 , 1)) %>%
+      mutate(city = ifelse(city == "no", 0 , 1))
+```
+
+## EDA
+
+```{r}
+summary(is.na(data)) # no missing value
+summary(data$unemprate)
+summary(data$city)
+head(data)
+hist(data$income)
+```
+
+The histogram above has a right skewed distribution which signals that a very small number of observations has a high income compared to the majority of the data. There could be other factors influencing this such as
+
+1.  **Income Inequality**: During the 1970s, the United States, like many other countries, experienced income inequality. The distribution of income often has a long right tail, meaning that a small proportion of the population has a very high income compared to the rest, which can create a positive skew.
+
+2.  **Women's Labor Force Participation**: The 1970s marked a period where women's participation in the workforce was rising, but there was still a significant number who were housewives or worked part-time. Thus, the total family income would reflect this diversity, with some families having dual incomes and others relying primarily on the husband's income.
+
+3.  **Wage Disparities**: Differences in education, occupation, and discrimination led to wage disparities. Higher education levels and skilled professions typically led to higher earnings, but not everyone had equal access to these opportunities.
+
+4.  **Industrial and Economic Shifts**: The 1970s were a period of transition in the U.S. economy, with deindustrialization affecting certain regions more than others. This could mean higher incomes for families in growing economic sectors and lower incomes for those in declining industries or regions hit by unemployment.
+
+5.  **Economic Policies and Taxation**: Tax structures and government policies can also impact income distribution. For instance, policies that favor capital gains can benefit higher-income households more than lower-income ones, skewing the distribution of income.
+
+6.  **Dual-Earner Premium**: Families where both spouses work may earn a 'dual-earner' premium, increasing the household income substantially compared to households with a single earner.
+
+7.  **Unemployment Rates**: The unemployment rate can influence household income, with higher unemployment potentially leading to lower average incomes and more skewness in the income distribution.
+
+8.  **Demographic Factors**: Age, number of children, and education level can influence earning potential and job opportunities, contributing to the variation in household income.
+
+```{r}
+data %>%
+  group_by(city) %>%
+  summarise(n=n(),min=min(unemprate),q25=quantile(unemprate,.25),mean=mean(unemprate),
+            q75=quantile(unemprate,.75),max=max(unemprate))
+
+```
+
+**Interpretation:**
+
+For unemployment rate with women who are housewives, 25% of the unemployment rate was below 5.0% while 75% of the unemployment rate are below 11%. On the other hand the unemployment rate with women working but not housewives , 25% of the unemployment rate was below 7.5% while 75% of the unemployment rate are below 11%. Based on the data, city 1 has a higher unemployment rate when compared to women who are housewives.
+
+```{r}
+data %>%
+  group_by(work) %>%
+  summarise(n=n(),min=min(income),q25=quantile(income,.25),mean=mean(income),
+            q75=quantile(income,.75),max=max(income))
+```
+
+**Interpretation:**
+
+For housewives not living in a city, 25% of the workers earn less than \$14,000 while 75% of the workers earn less than \$26,040. For wives living in a city, 25% of the workers earn less than \$16,2866.25 while 75% of the workers earn less than \$29,793.42. For wives living in a city has a higher income in terms of minimum, quartile 25%, mean, and quartile 75%. However, an interesting phenomena is that the max income in wives living in the cities is higher than 0.
+
+```{r}
+ggplot(data,aes(x=work,y=income)) + 
+  geom_boxplot() + 
+  facet_wrap(~work)
+```
+
+The bulk of the densities are terribly different between treat/control groups. Notice that these two groups both appear to have some extreme observations. We can consider removing, but we'll keep those for now until we have a chance to investigate why those extremes exist.
+
+# Methodology
+
+## 1) Matching
+
+### a. Exact Matching
+
+#### Matching on city
+
+```{r}
+matches.Exact.city = matchit(work ~ city,data=data,method="exact", verbose = TRUE)
+summary(matches.Exact.city) 
+matched.Exact.city = match.data (matches.Exact.city) 
+head(matched.Exact.city)
+```
+
+##### Compute ATE via DiM
+
+```{r}
+AvgTreat_matched.city = matched.Exact.city %>%
+  filter(work == 1)%>%
+  select(income)
+AvgControl_matched.city= matched.Exact.city %>%
+  filter(work == 0)%>%
+  select(income)
+TE.Exact.city.DiM = mean(AvgTreat_matched.city$income)-mean(AvgControl_matched.city$income)
+TE.Exact.city.DiM
+```
+
+The ATE here is 2432.371, which means that quit working at home would increase the family income by \$2432.371. The result was largely in line with expectations.
+
+#### Matching on unemprate
+
+```{r}
+matches.Exact.unemprate = matchit(work ~ unemprate,data=data,method="exact", verbose = TRUE)
+summary(matches.Exact.unemprate) 
+matched.Exact.unemprate = match.data (matches.Exact.unemprate) 
+head(matched.Exact.unemprate)
+```
+
+```{r}
+ContingencyTable_UnempRate = table(data$unemprate, data$work)
+mosaicplot(ContingencyTable_UnempRate,
+           color = TRUE,
+           xlab = "UnempRate", 
+           ylab = "Treatment Status", 
+           main = "UnempRate"
+)
+
+proptbl = prop.table(ContingencyTable_UnempRate,margin=1)
+proptbl = proptbl[order(proptbl[,1],decreasing = TRUE),]
+print(proptbl,digits = 2)
+```
+
+If we look at the graph you would notice that for treatment status 0 (housewife) there are more people with lower unemployment rates while for treatment status 1 (not a housewife) it seems to be more uniformed distribution. Since we cannot make a conclusion on the treatment effect, we will conduct different tests.
+
+##### Compute ATE via DiM
+
+```{r}
+AvgTreat_matched.unemprate = matched.Exact.unemprate %>%
+  filter(work == 1)%>%
+  select(income)
+AvgControl_matched.unemprate= matched.Exact.unemprate %>%
+  filter(work == 0)%>%
+  select(income)
+TE.Exact.unemprate.DiM = mean(AvgTreat_matched.unemprate$income)-mean(AvgControl_matched.unemprate$income)
+TE.Exact.unemprate.DiM
+```
+
+Compared these two different models with different matching variables, the ATM value calculated by Dim is exactly the same. For this reason, we analyze because the matching may not have balanced the characteristics between the two groups well, resulting in their distribution being similar in terms of age and unemployment, and thus producing similar income differences.
+
+#### Matching on agew
+
+Considering that in real life, the impact of the wife's absence from home on the family income will also be affected by her age, we also did a matching on the wife's age.
+
+```{r}
+matches.Exact.agew = matchit(work ~ agew,data=data,method="exact", verbose = TRUE)
+summary(matches.Exact.agew) 
+matched.Exact.agew = match.data (matches.Exact.agew) 
+head(matched.Exact.agew)
+```
+
+```{r}
+ContingencyTable_AgeW = table(data$agew, data$work)
+mosaicplot(ContingencyTable_AgeW,
+           color = TRUE,
+           xlab = "AgeW", 
+           ylab = "Treatment Status",
+           main = "AgeW"
+)
+
+proptbl = prop.table(ContingencyTable_AgeW,margin=1)
+proptbl = proptbl[order(proptbl[,1],decreasing = TRUE),]
+print(proptbl,digits = 2)
+```
+
+Based on the image above shows a visual depiction of amounts of wives are housewives and not housewives in our dataset.
+
+##### Compute ATE via DiM
+
+```{r}
+AvgTreat_matched.agew = matched.Exact.agew %>%
+  filter(work == 1)%>%
+  select(income)
+AvgControl_matched.agew= matched.Exact.agew %>%
+  filter(work == 0)%>%
+  select(income)
+TE.Exact.agew.DiM = mean(AvgTreat_matched.agew$income)-mean(AvgControl_matched.agew$income)
+TE.Exact.agew.DiM
+```
+
+This indicates that the average household income where the wife is a housewife is \$2,432.37 higher than the household income where the wife works.
+
+#### Matching on Age & City & UnempRate
+
+We do a more complex matching that on wife's age, whether they live in a big city and the unemployment rate.
+
+```{r}
+matches.Exact.AgeCityUnem <- matchit(work ~ agew+city+unemprate, data=data,method="exact",verbose = TRUE)
+summary(matches.Exact.AgeCityUnem) 
+matched.Exact.AgeCityUnem = match.data(matches.Exact.AgeCityUnem) 
+```
+
+##### Compute ATE via DiM
+
+```{r}
+AvgTreat_matched.AgeCityUnem = matched.Exact.AgeCityUnem %>%
+  filter(work == 1)%>%
+  select(income)
+AvgControl_matched.AgeCityUnem= matched.Exact.AgeCityUnem %>%
+  filter(work == 0)%>%
+  select(income)
+TE.Exact.AgeCityUnem.DiM = mean(AvgTreat_matched.AgeCityUnem$income)-mean(AvgControl_matched.AgeCityUnem$income)
+TE.Exact.AgeCityUnem.DiM
+```
+
+From this matching, there are 84 units in control group and 119 in treated group are unmatched.
+
+The result was largely in line with expectations. The 2589.13 implies that quiting working at home would increase the family income by \$2589.13. This is larger (in magnitude) than when matching on Agew only.
+
+But actually the more widely used matching technique is Nearest Neighbor.
+
+### b. Nearest Neighbor Matching
+
+#### NN - Euclidean - Agew
+
+```{r}
+matches.NN.Agew = matchit(work ~ agew,method="nearest",distance="scaled_euclidean",verbose = TRUE,data=data)
+summary(matches.NN.Agew)
+matched.NN.Agew = match.data(matches.NN.Agew) 
+```
+
+There are more unmatched control units and then we considering changing "Ratio". But it doesn't work.
+
+#### Impose a caliper to improve the quality of matches
+
+We used a caliper to ensure that we get high quality matches.
+
+```{r}
+matches.NN.Agew.Caliper = matchit(work~agew,method="nearest",distance="scaled_euclidean",verbose = TRUE,data=data,ratio=3,caliper = c(agew=.1), std.caliper = TRUE)
+summary(matches.NN.Agew.Caliper) 
+head(matches.NN.Agew.Caliper$match.matrix)
+```
+
+#### Calculate Treatment Effect
+
+```{r}
+matched.NN.Agew.Caliper = match.data(matches.NN.Agew.Caliper)
+ATE.NN.Agew.Caliper= mean(matched.NN.Agew.Caliper$income[matched.NN.Agew.Caliper$work == 1])- mean(matched.NN.Agew.Caliper$income[matched.NN.Agew.Caliper$work == 0])
+ATE.NN.Agew.Caliper
+```
+
+## 2) OLS
+
+Run an OLS model that estimates the ATE, controlling only for city, unemployment rate
+
+```{r}
+ATE.OLS.CityUnempRate.model = lm(income~work+city+unemprate, data = data)
+summary(ATE.OLS.CityUnempRate.model)
+```
+
+### Extracting ATE via avg_comparisons
+
+```{r}
+avg_comparisons(ATE.OLS.CityUnempRate.model,variables = "work")
+```
+
+The Estimate ATE here is 2483 dollars, which is very close to the previous matching method.
+
+## 3) Regression Adjustment
+
+There is omitted variables bias. So firstly considering adding more covariates.
+
+### a. ATE Controlling for more covariates
+
+Run a simple OLS that controls for more covariates, including the husband's wage, husband's educational attainment (in years) , wife's wage and her educational attainment.
+
+```{r}
+ATE.OLS.model_1 = lm(income~work+city+unemprate+wageh+wagew+educh+educw, data = data)
+summary(ATE.OLS.model_1)
+```
+
+The estimate coefficient of work variable is 808.25 in the linear regression, which is much less than the previous estimation. But since the p-value is relatively big and this number here is not significant, so the regression adjustment is essential.
+
+### b. TE with interacting confounders
+
+```{r}
+model.TE.InterA_1 = lm(income~ work*(city+unemprate+wageh+wagew+educh+educw), data=data)
+summary(model.TE.InterA_1)
+```
+
+```{r}
+avg_comparisons(model.TE.InterA_1,variables = "work")
+```
+
+The estimate value here is \$4042.
+
+### c. RA+Match
+
+-   We also consider another powerful approach, that is combineing matching with regression adjustment. Specifically, first we find matches. Then we run regression only on those matches.
+
+-   The adjusted regression we use is the basic OLS, since the coefficient of work is the most significant, and the matched data we use is matched.NN.Agew.
+
+```{r}
+model.OLS.matched = lm(income~work+city+unemprate, data = matched.NN.Agew)
+summary(model.OLS.matched)
+```
+
+## 4) IV for OVB
+
+We use IV to try to eliminate the OVB, the instrument variable here we select is the number of children less than 6 years old in household (child6). The theory we select it as an instrument variable is as follows.
+
+-   Relevance. We believe that the number of young kids in the household would influence whether the mother is a housewife (e.g. if there is a or more young kids that are less than 6 years old, the mother is more likely to choose to work at home) .
+
+-   Exclusion: the number of young children in a household cannot influence family income directly (it only influence the cost of the household, but not the income)
+
+-   Independence: the number of children less than 6 years old in household cannot be related to whatever is omitted.
+
+```{r}
+iv = ivreg(income ~ work + city + unemprate + wageh + wagew + educh + educw| child6 +city + unemprate + wageh + wagew + educh + educw, data = data)
+summary(iv, diagnostics = TRUE)
+```
+
+-   The diagnostics prove that the instrument variable we select is strong through the small p-value. We have confidence that the instrument is valid, in that is it sufficiently related to whether the mother is a housewife.The ATE here is \$8123.29.
+
+-   But as for the Wu-Hausman test, we can not reject the null assumption. So we can not conclude that we do indeed have an endogeneity problem caused by OVB.
+
+-   In summary, the instrument variable we used here is strong and valid but it doesn't mean that the IV is necessary.
+
+## 5) Simultaneous Systems
+
+We have designed two equations:(1) income equation and (2) work participation equation because we believe that being a housewife impacts household income and vice versa.
+
+Income Equation:
+
+$$ income =  \beta_{0}+\beta_{1}work + \beta_{2}wageh+ \beta_{3}hoursh+\beta_{4}educw +\beta_{5}unemprate + u_{1}$$
+
+Work Participation Equation:
+
+$$ work =  \alpha_{0}+ \alpha_{1}income +  \alpha_{2}educw +  \alpha_{3}child6+  \alpha_{4}child618 + \alpha_{5}unemprate +  \alpha_{6}city +  \alpha_{7}experience + u_{2}$$
+
+-   We will not be estimating the income curve and work participation curve directly because simultaneity bias may exist in the sense that work could be endogenous meaning that a high family income leads to a wife more likely being a housewife. Secondly, there might be a chance of direct bias which means that income has impact or influence on the independent variables. Thirdly, indirect bias is similar to the OVB issue hence we will not be estimating directly.
+
+### a) Income Equation
+
+#### OLS
+
+Q: Estimate the income equation by OLS
+
+```{r}
+# OLS estimation for the income equation
+income.ols <- lm(income ~ work + wageh + hoursh + educw + experience, data = data) 
+summary(income.ols)
+
+```
+
+#### Instrument Validity
+
+-   Estimate the IV model
+
+```{r}
+income.iv <- ivreg(income ~ work + wageh + hoursh + educw + experience | 
+                   child6 + wageh + hoursh + educw + experience, data = data)
+summary(income.iv, diagnostics = TRUE)
+
+```
+
+-   Why did we choose child6 as an instrument?
+
+    -   **Relevance**: The weak instrument test confirms that our instrument child under 6 is highly correlated with our work variable
+
+    -   **Independence (Exogeneity)**: Child under 6 is a valid instrument because it is not correlated with the error term meaning it is not influenced by other confounders that are impacted by income. Only impacted through work.
+
+    -   **Exclusion**: The child6 only impacts income through the decision of work and not through anything else.
+
+-   Interpret Diagnostic
+
+    -   **Weak instruments**: The weak instrument indicated that the p-value was 1.41e-07 which indicates that child6 is indeed a strong and relevant instrument.
+    -   **Wu-Hausman**: Our Wu-Hausman test indicated that the p-value was 0.114 which is not significant signficant to reject the null hypothesis and that the OLS estimate is consistent.
+
+-   Interpret the R-Squared:
+
+    -   The R\^2 value was 66.35% or 0.6635. This can be interpreted as 0.6278 of the variation in the variable income is explained by the model. This is a positive sign and it also suggests that the IV estimates are reliable.
+
+#### OLS Vs IV
+
+```{r}
+income.ols$coefficients[2]
+income.iv$coefficients[2]
+
+```
+
+### b) Work Participation Equation
+
+#### OLS
+
+Q: Estimate the work participation equation by OLS.
+
+```{r}
+workparticipation.ols <- lm(work ~ income + educw + agew + child6 + child618 + unemprate + city + experience, data = data)
+summary(workparticipation.ols)
+
+```
+
+#### **IV**
+
+```{r}
+workparticipation.iv <- ivreg(work ~ income + educw + agew + child6 + child618 + unemprate + city + experience | educw + agew + child6 + child618 + unemprate + city + experience + ageh + educh, data = data)
+summary(workparticipation.iv, diagnostic=TRUE)
+```
+
+-   Interpretation of Coefficients
+
+    -   **Weak Instruments**: The weak instrument test has a p-value of 5.26e-07 which indicates that it rejects the null hypothesis of weak instruments. This indicates that ageh and educh is highly correlated with endogenous regressor work.
+
+    -   **Wu-Hausman**: The Wu-Hausman test indicates that IV estimates are preferred over OLS because it is unbiased.
+
+-   Why did we choose our instruments
+
+    -   **Relevance**: age of husband and education of husband are highly correlated with income and the weak instrument test confirms this. We choose this because we think that husband's age and education level impact household's income capacity, which in turn could affect the the wife's decision to be a housewife.
+    -   **Independence (Exogeneity)**: we think that ageh and educh are not correlated with the error term and that income is independent of a wife's decision to be a housewife
+    -   **Exclusion**: It also satisfies the exclusion because it affects the wife working as a housewife only through the influence on household income.
+
+#### OLS Vs. IV
+
+```{r}
+workparticipation.ols$coefficients[2]
+workparticipation.iv$coefficients[2]
+```
+
+Our interpretation is that the income ols estimate infers that 3.173439e-06 work participation or wife works results in an increase in income. Interestingly, the IV which was -1.397359e-05 inidcates that when we take into account endogeneity income does the opposite of what we see with OLS. This means that when income increase work participation decreases. This could be correct because if you have live in a household that has more income then there is less of a need for wife to work. Hence, she may want to be a housewife.
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+```
